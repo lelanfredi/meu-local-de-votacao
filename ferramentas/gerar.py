@@ -66,8 +66,7 @@ def main(arquivo, quando):
     novo = {"s": textos, "r": regs, "geo": {"states": antigo["geo"]["states"], "h": antigo["geo"]["h"], "xy": xy}}
     html = html[:ini] + json.dumps(novo, ensure_ascii=False, separators=(",", ":")) + html[ini + fim:]
 
-    html, n1 = re.subn(r"(<b>Dados oficiais do TSE</b>, )[^<]*?\.(?= <span id=\"t-total\">)",
-                       rf"\g<1>atualizados em {quando}.", html)
+    html, n1 = re.subn(r'(<b id="atualizado">)[^<]*(</b>)', rf"\g<1>{quando}\g<2>", html)
     html, n2 = re.subn(r"consultada em [^<]*? no (<a href=\"https://sig\.tse\.jus\.br/\")",
                        rf"consultada em {quando} no \1", html)
     if n1 != 1 or n2 != 1:
