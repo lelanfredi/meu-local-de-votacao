@@ -136,6 +136,19 @@ details[open] summary::after{content:"−"}
 .confirm{background:var(--surface);border:2px solid var(--accent);border-radius:14px;padding:16px 18px;display:grid;gap:8px}
 .atual{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;background:var(--surface);border:2px solid var(--accent);border-radius:12px;padding:10px 14px;font-size:16px}
 .atual small{flex-basis:100%;color:var(--muted);font-size:14px}
+.relatorio{display:grid;gap:12px;scroll-margin-top:12px}
+.rel-lista{display:grid;gap:18px}
+.rel-uf{display:grid;gap:8px}
+.rel-uf h3{font-size:19px}
+.rel-cids{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:inherit;font-weight:700;font-size:17px;border:2px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:8px 14px;min-height:44px;cursor:pointer;text-align:left}
+.chip span{color:var(--muted);font-weight:400;margin-left:2px}
+.chip:hover{border-color:var(--accent)}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.chip[aria-pressed="true"] span{color:inherit}
+.rel-out{background:var(--surface);border:2px solid var(--accent);border-radius:16px;padding:18px;display:grid;gap:12px;scroll-margin-top:12px}
+.rel-img{display:block;width:100%;max-width:520px;height:auto;border:1px solid var(--line);border-radius:10px;justify-self:center}
+.relink{justify-self:start}
 footer{font-size:15px;color:var(--muted);display:grid;gap:6px;border-top:1px solid var(--line);padding-top:16px}
 </style>
 
@@ -153,6 +166,7 @@ footer{font-size:15px;color:var(--muted);display:grid;gap:6px;border-top:1px sol
       <li><span><b>Não pedimos CPF, nome nem título.</b> O que você digita não sai do seu celular nem fica guardado.</span></li>
       <li><span><b>Feito por voluntários</b>, sem ligação com partido, candidato ou com o próprio TSE.</span></li>
     </ul>
+    <a class="btn ghost small relink" href="#relatorio">Relatório por cidade, em imagem para compartilhar</a>
   </header>
 
   <p class="sample" id="sample" hidden>Esta é uma versão de teste, com poucos dados. Ainda não use para conferir seu local.</p>
@@ -206,6 +220,14 @@ footer{font-size:15px;color:var(--muted);display:grid;gap:6px;border-top:1px sol
   </section>
 
   <section id="painel" aria-live="polite"></section>
+
+  <section class="relatorio" id="relatorio" aria-labelledby="rel-title">
+    <h2 id="rel-title">Relatório por cidade</h2>
+    <p class="lede">Escolha a sua cidade e gere uma imagem com todas as seções que mudaram de lugar. Dá para baixar a imagem ou um PDF e mandar no WhatsApp para quem vota aí.</p>
+    <p class="hint" id="rel-count"></p>
+    <div class="rel-out" id="rel-out" hidden aria-live="polite"></div>
+    <div class="rel-lista" id="rel-lista"></div>
+  </section>
 
   <div class="confirm">
     <p><b>Confirme também no site da Justiça Eleitoral.</b> Lá você vê seu local com o seu nome ou CPF.</p>
@@ -472,6 +494,180 @@ function searchQ(){
 }
 $("#q").addEventListener("input", () => { clearTimeout(tq); tq = setTimeout(searchQ, 200); });
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(tq); searchQ(); } });
+
+// ---------- Relatório por cidade: imagem e PDF para compartilhar ----------
+const SITE = "meu-local-de-votacao.vercel.app";
+const relLista = $("#rel-lista"), relOut = $("#rel-out");
+const slug = s => norm(s).toLowerCase().replace(/ /g, "-");
+const IMG = {bg:"#f4f6f3", ink:"#15231d", muted:"#4f5f57", accent:"#0b6b4f", mark:"#ffe14d", old:"#7d4f49", line:"#c9d5ce", card:"#ffffff"};
+const FONT = '"Atkinson Hyperlegible Next","Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
+
+(function montarLista(){
+  const porUF = {};
+  for (const c of cities.values()) (porUF[c.uf] ||= []).push(c);
+  const ufs = Object.keys(porUF).sort((a,b) => UFN[a].localeCompare(UFN[b], "pt-BR"));
+  relLista.innerHTML = ufs.map(uf => `<div class="rel-uf"><h3>${UFN[uf]}</h3><div class="rel-cids">${
+    porUF[uf].sort((a,b) => a.mun.localeCompare(b.mun, "pt-BR")).map(c =>
+      `<button type="button" class="chip" data-uf="${uf}" data-mun="${esc(c.mun)}">${esc(nice(c.mun))} <span>${plural(c.n,"seção","seções")}</span></button>`).join("")
+  }</div></div>`).join("");
+  $("#rel-count").textContent = `${plural(cities.size,"cidade","cidades")} com alguma seção que mudou de lugar. Toque na sua cidade.`;
+  relLista.addEventListener("click", e => { const b = e.target.closest("button.chip"); if (b) abrirRelatorio(b.dataset.uf, b.dataset.mun, b); });
+})();
+
+function quebrar(ctx, texto, largura){
+  const linhas = []; let atual = "";
+  for (const p of String(texto).split(/\s+/)) {
+    const teste = atual ? atual + " " + p : p;
+    if (ctx.measureText(teste).width <= largura || !atual) atual = teste;
+    else { linhas.push(atual); atual = p; }
+  }
+  if (atual) linhas.push(atual);
+  return linhas;
+}
+
+// Escreve um parágrafo e devolve o y seguinte. Com draw = false, só mede.
+function texto(ctx, draw, t, x, y, largura, fonte, cor, lh, op = {}){
+  ctx.font = fonte;
+  for (const l of quebrar(ctx, t, largura)) {
+    if (draw) {
+      const w = ctx.measureText(l).width;
+      if (op.mark) { ctx.fillStyle = IMG.mark; ctx.fillRect(x - 8, y + lh*0.08, w + 16, lh*0.9); }
+      ctx.fillStyle = cor; ctx.fillText(l, x, y + lh*0.76);
+      if (op.strike) ctx.fillRect(x, y + lh*0.48, w, 3);
+    }
+    y += lh;
+  }
+  return y;
+}
+
+function caixa(ctx, x, y, w, h, r, cor, borda){
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+  ctx.fillStyle = cor; ctx.fill();
+  if (borda) { ctx.lineWidth = 3; ctx.strokeStyle = borda; ctx.stroke(); }
+}
+
+function desenharRelatorio(ctx, draw, d){
+  const W = 1080, P = 64, CW = W - 2*P, IN = 36, TW = CW - 2*IN;
+  // Cabeçalho verde
+  const cab = dr => {
+    let y = 56;
+    y = texto(ctx, dr, "2º TURNO · DOMINGO, 25 DE OUTUBRO", P, y, CW, `800 30px ${FONT}`, IMG.mark, 42);
+    y = texto(ctx, dr, "Mudou o local de votação", P, y + 6, CW, `800 66px ${FONT}`, "#ffffff", 76);
+    y = texto(ctx, dr, `${nice(d.mun)}, ${d.uf}`, P, y + 8, CW, `800 54px ${FONT}`, "#ffffff", 64);
+    y = texto(ctx, dr, `${plural(d.n, "seção mudou", "seções mudaram")} de lugar`, P, y + 4, CW, `400 34px ${FONT}`, "#e3f1ea", 46);
+    return y + 48;
+  };
+  const hCab = cab(false);
+  if (draw) {
+    ctx.fillStyle = IMG.bg; ctx.fillRect(0, 0, W, ctx.canvas.height);
+    ctx.fillStyle = IMG.accent; ctx.fillRect(0, 0, W, hCab);
+    cab(true);
+  }
+  let y = hCab + 40;
+  // Um quadro por grupo de seções que saíram do mesmo lugar para o mesmo lugar
+  for (const g of d.gs) {
+    const corpo = (dr, y0) => {
+      let yy = y0 + IN;
+      const sec = `Zona ${g.zona} · ${g.secoes.length > 1 ? "Seções" : "Seção"} ${g.secoes.join(", ")}`;
+      yy = texto(ctx, dr, sec, P + IN, yy, TW, `800 36px ${FONT}`, IMG.ink, 48);
+      if (g.old === g.neu) {
+        yy = texto(ctx, dr, "LOCAL", P + IN, yy + 14, TW, `800 24px ${FONT}`, IMG.muted, 34);
+        yy = texto(ctx, dr, g.neu, P + IN, yy, TW, `800 38px ${FONT}`, IMG.ink, 50, {mark:true});
+        yy = texto(ctx, dr, "O nome do local é o mesmo, mas o TSE incluiu essa seção na lista de mudanças. Confirme o endereço.", P + IN, yy + 8, TW, `400 28px ${FONT}`, IMG.muted, 38);
+      } else {
+        yy = texto(ctx, dr, "ANTES, VOTAVA EM", P + IN, yy + 14, TW, `800 24px ${FONT}`, IMG.muted, 34);
+        yy = texto(ctx, dr, g.old, P + IN, yy, TW, `400 32px ${FONT}`, IMG.old, 44, {strike:true});
+        yy = texto(ctx, dr, "AGORA, VAI VOTAR EM", P + IN, yy + 14, TW, `800 24px ${FONT}`, IMG.muted, 34);
+        yy = texto(ctx, dr, g.neu, P + IN, yy, TW, `800 38px ${FONT}`, IMG.ink, 50, {mark:true});
+      }
+      return yy + IN;
+    };
+    const h = corpo(false, y) - y;
+    if (draw) { caixa(ctx, P, y, CW, h, 22, IMG.card, IMG.line); corpo(true, y); }
+    y += h + 24;
+  }
+  // Rodapé
+  y += 16;
+  y = texto(ctx, draw, `Lista oficial do TSE de ${d.quando}.`, P, y, CW, `400 28px ${FONT}`, IMG.muted, 40);
+  y = texto(ctx, draw, `Confira a sua seção em ${SITE}`, P, y + 6, CW, `800 32px ${FONT}`, IMG.accent, 44);
+  y = texto(ctx, draw, "e confirme no site do TSE: Consultas › Onde votar.", P, y, CW, `400 28px ${FONT}`, IMG.ink, 40);
+  y = texto(ctx, draw, "Site independente, feito por voluntários. Não é um site oficial da Justiça Eleitoral.", P, y + 10, CW, `400 24px ${FONT}`, IMG.muted, 34);
+  return Math.max(y + 56, 1350);
+}
+
+async function gerarImagem(d){
+  try { await Promise.all([document.fonts.load(`800 40px ${FONT}`), document.fonts.load(`400 40px ${FONT}`)]); } catch (e) {}
+  const cv = document.createElement("canvas");
+  cv.width = 1080; cv.height = 10;
+  const ctx = cv.getContext("2d");
+  cv.height = desenharRelatorio(ctx, false, d);
+  desenharRelatorio(ctx, true, d);
+  return cv;
+}
+
+// PDF de uma página com a imagem (JPEG), sem biblioteca externa
+function montarPdf(jpg, wpx, hpx){
+  const W = 595.28, H = +(W * hpx / wpx).toFixed(2), enc = new TextEncoder(), partes = [], pos = [];
+  let n = 0;
+  const put = x => { const b = typeof x === "string" ? enc.encode(x) : x; partes.push(b); n += b.length; };
+  const obj = (i, s) => { pos[i] = n; put(`${i} 0 obj\n${s}\nendobj\n`); };
+  put("%PDF-1.4\n");
+  obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+  obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+  obj(3, `<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${W} ${H}]/Resources<</XObject<</Im0 4 0 R>>>>/Contents 5 0 R>>`);
+  pos[4] = n;
+  put(`4 0 obj\n<</Type/XObject/Subtype/Image/Width ${wpx}/Height ${hpx}/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ${jpg.length}>>\nstream\n`);
+  put(jpg); put("\nendstream\nendobj\n");
+  const c = `q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+  obj(5, `<</Length ${c.length}>>\nstream\n${c}\nendstream`);
+  const xref = n;
+  put(`xref\n0 6\n0000000000 65535 f \n` + [1,2,3,4,5].map(i => String(pos[i]).padStart(10, "0") + " 00000 n \n").join(""));
+  put(`trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF\n`);
+  return new Blob(partes, {type: "application/pdf"});
+}
+
+function baixar(blob, nome){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = nome;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+let relUrl = null;
+async function abrirRelatorio(uf, mun, botao){
+  relLista.querySelectorAll('.chip[aria-pressed="true"]').forEach(x => x.setAttribute("aria-pressed", "false"));
+  if (botao) botao.setAttribute("aria-pressed", "true");
+  const gs = G.filter(g => g.uf === uf && g.mun === mun).sort((a,b) => a.zona - b.zona || a.secoes[0] - b.secoes[0]);
+  const d = {uf, mun, gs, n: gs.reduce((s,g) => s + g.secoes.length, 0), quando: $("#atualizado").textContent.trim()};
+  relOut.hidden = false;
+  relOut.innerHTML = `<p class="hint">Preparando a imagem de ${esc(nice(mun))}…</p>`;
+  relOut.scrollIntoView({behavior: "smooth", block: "start"});
+  const cv = await gerarImagem(d);
+  const png = await new Promise(r => cv.toBlob(r, "image/png"));
+  if (relUrl) URL.revokeObjectURL(relUrl);
+  relUrl = URL.createObjectURL(png);
+  const base = `local-de-votacao-${slug(mun)}-${uf.toLowerCase()}`;
+  relOut.innerHTML = `<h3>${esc(nice(mun))}, ${uf}</h3>
+    <p>${plural(d.n, "seção mudou", "seções mudaram")} de lugar. Salve a imagem e mande para quem vota na cidade.</p>
+    <img class="rel-img" src="${relUrl}" alt="Imagem com as seções que mudaram de local em ${esc(nice(mun))}, ${uf}">
+    <div class="acts">
+      <button class="btn" type="button" id="rel-share" hidden>Compartilhar a imagem</button>
+      <a class="btn" href="${relUrl}" download="${base}.png">Baixar imagem</a>
+      <button class="btn ghost" type="button" id="rel-pdf">Baixar PDF</button>
+    </div>
+    <p class="hint">No celular, você também pode tocar e segurar a imagem para salvar.</p>`;
+  const arquivo = new File([png], base + ".png", {type: "image/png"});
+  if (navigator.canShare && navigator.canShare({files: [arquivo]})) {
+    const b = $("#rel-share"); b.hidden = false;
+    b.onclick = () => navigator.share({files: [arquivo], title: `Locais de votação que mudaram em ${nice(mun)}`, text: `Confira se a sua seção mudou: https://${SITE}`}).catch(() => {});
+  }
+  $("#rel-pdf").onclick = () => {
+    const bin = atob(cv.toDataURL("image/jpeg", 0.92).split(",")[1]);
+    const jpg = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) jpg[i] = bin.charCodeAt(i);
+    baixar(montarPdf(jpg, cv.width, cv.height), base + ".pdf");
+  };
+}
 </script>
 
 </body>
